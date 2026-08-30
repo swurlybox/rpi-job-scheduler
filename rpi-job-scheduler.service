@@ -1,0 +1,14 @@
+[Unit]
+Description=RPi print job scheduler (Express server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/rpi-job-scheduler
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
