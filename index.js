@@ -12,11 +12,12 @@ const app = express();
 app.use(morgan('dev'));
 app.use(express.json({limit: '1mb'}));
 
-/* Dry runs still launch a full Playwright session and fetch one PDF per SKU
-    (see Seller-Central-Label-Printing-Automation's printLabels.ts and its
-    REQUEST_PACING_MS) -- the default 15s exec timeout isn't close to enough
-    for that, so this route gets its own longer budget. */
-const DRY_PRINT_TIMEOUT_MS = 120000;
+/* Both dry and real print runs launch a full Playwright session and fetch
+    (or print) one label per SKU (see Seller-Central-Label-Printing-Automation's
+    printLabels.ts and its REQUEST_PACING_MS) -- the default 15s exec timeout
+    isn't close to enough for that, so these routes get their own longer
+    budget. */
+const PRINT_TIMEOUT_MS = 120000;
 
 /* Test to see if we can get an endpoint to fire off an external program. */
 app.get('/get-printers', job_scheduler_authentication, async (req, res) => {
@@ -32,11 +33,12 @@ app.get('/get-printers', job_scheduler_authentication, async (req, res) => {
 
 /* Accepts a JSON array of { sku, quantity } label requests, overwrites the
     print-label workflow's data/products.json with them, then runs that
-    workflow's CLI in --dry-run mode (downloads the label PDFs, never sends
-    them to a physical printer) and relays its structured results back. */
-app.post('/dry-print', job_scheduler_authentication, async (req, res) => {
+    workflow's CLI (relaying its structured --json results back). In dry-run
+    mode the CLI downloads the label PDFs and never sends them to a physical
+    printer; shared by both /dry-print and /print below, which differ only in
+    that flag. */
+async function handlePrintRequest(req, res, {dryRun}) {
     const PRINT_LABEL_WORKFLOW_PATH = process.env.PRINT_LABEL_WORKFLOW_ABSOLUTE_PATH;
-    console.log(PRINT_LABEL_WORKFLOW_PATH);
     if (!PRINT_LABEL_WORKFLOW_PATH) {
         const error = 'Server misconfigured: PRINT_LABEL_WORKFLOW_ABSOLUTE_PATH is not set.';
         console.error(error);
@@ -62,12 +64,17 @@ app.post('/dry-print', job_scheduler_authentication, async (req, res) => {
         return res.status(500).send({error: 'Failed to write products.json'});
     }
 
+    const cliArgs = ['run', 'print', '--', '--file', 'data/products.json', '--json'];
+    if (dryRun) {
+        cliArgs.splice(cliArgs.length - 1, 0, '--dry-run');
+    }
+
     try {
         const stdout = await exec_external_program(
             PRINT_LABEL_WORKFLOW_PATH,
             'npm',
-            ['run', 'print', '--', '--file', 'data/products.json', '--dry-run', '--json'],
-            {timeoutMs: DRY_PRINT_TIMEOUT_MS}
+            cliArgs,
+            {timeoutMs: PRINT_TIMEOUT_MS}
         );
 
         try {
@@ -80,7 +87,15 @@ app.post('/dry-print', job_scheduler_authentication, async (req, res) => {
     } catch (error) {
         res.status(400).send({error: 'Program failed'});
     }
-});
+}
+
+app.post('/dry-print', job_scheduler_authentication, (req, res) => handlePrintRequest(req, res, {dryRun: true}));
+
+/* Same as /dry-print but without --dry-run -- this actually sends labels to
+    the physical printer. Gated by the same bearer-key auth; callers are
+    expected to add their own confirmation step before hitting this, since
+    unlike the dry run it can't be undone. */
+app.post('/print', job_scheduler_authentication, (req, res) => handlePrintRequest(req, res, {dryRun: false}));
 
 /* Catches express.json()'s SyntaxError for malformed JSON bodies so callers
     get a clean 400 instead of Express's default HTML error page. Must be
