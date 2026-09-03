@@ -23,15 +23,15 @@ class ValidationError extends Error {
     failure -- the caller is expected to turn that into a 400 response. */
 function validateLabelRequests(body) {
     if (!Array.isArray(body)) {
-        throw new ValidationError('Request body must be a JSON array of { sku, quantity } objects.');
+        throw new ValidationError('Data must be a JSON array of { sku, quantity } objects.');
     }
 
     if (body.length === 0) {
-        throw new ValidationError('Request body must contain at least one { sku, quantity } entry.');
+        throw new ValidationError('Labels to print is 0.');
     }
 
     if (body.length > MAX_REQUESTS) {
-        throw new ValidationError(`Request body must contain ${MAX_REQUESTS} entries or fewer (got ${body.length}).`);
+        throw new ValidationError(`Data must contain ${MAX_REQUESTS} entries or fewer (got ${body.length}).`);
     }
 
     const requests = [];

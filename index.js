@@ -1,12 +1,19 @@
 const express = require('express');
 const morgan = require('morgan');
 const path = require('path');
+const Airtable = require('airtable');
+
 const {job_scheduler_authentication} = require('./middleware/api_auth');
 const {exec_external_program} = require('./utils/job_scheduler');
 const {validateLabelRequests, ValidationError} = require('./utils/validate_label_requests');
 const {writeProductsFile} = require('./utils/write_products_file');
 
 require('dotenv').config();
+
+const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(
+    process.env.AIRTABLE_BASE_ID
+);
+
 const app = express();
 
 app.use(morgan('dev'));
@@ -37,7 +44,7 @@ app.get('/get-printers', job_scheduler_authentication, async (req, res) => {
     mode the CLI downloads the label PDFs and never sends them to a physical
     printer; shared by both /dry-print and /print below, which differ only in
     that flag. */
-async function handlePrintRequest(req, res, {dryRun}) {
+async function handlePrintRequest(json_data, res, {dryRun}) {
     const PRINT_LABEL_WORKFLOW_PATH = process.env.PRINT_LABEL_WORKFLOW_ABSOLUTE_PATH;
     if (!PRINT_LABEL_WORKFLOW_PATH) {
         const error = 'Server misconfigured: PRINT_LABEL_WORKFLOW_ABSOLUTE_PATH is not set.';
@@ -47,7 +54,7 @@ async function handlePrintRequest(req, res, {dryRun}) {
 
     let requests;
     try {
-        requests = validateLabelRequests(req.body);
+        requests = validateLabelRequests(json_data);
     } catch (error) {
         if (error instanceof ValidationError) {
             return res.status(400).send({error: error.message, details: error.details});
@@ -89,19 +96,53 @@ async function handlePrintRequest(req, res, {dryRun}) {
     }
 }
 
-app.post('/dry-print', job_scheduler_authentication, (req, res) => handlePrintRequest(req, res, {dryRun: true}));
+/* Queries an Airtable Shipment Table by exact match, returning all records that haven't had
+    their labels printed yet, and have been checked in. Returns a JSON array to be passed into
+    handlePrintRequest. */
+async function getUnprintedLabels(shipmentTableName) {
+    const records = await base(shipmentTableName)
+        .select({
+            filterByFormula: `AND({Label Printed} = FALSE(), {Checked In} = TRUE())`,
+            fields: ['SKU', 'Labels'],
+        })
+        .all();
+
+    return records.map((record) => ({
+        sku: record.get('SKU'),
+        quantity: record.get('Labels'),
+    }));
+}
+
+app.post('/dry-print', job_scheduler_authentication, (req, res) => {
+    handlePrintRequest(req.body, res, {dryRun: true})
+});
 
 /* Same as /dry-print but without --dry-run -- this actually sends labels to
     the physical printer. Gated by the same bearer-key auth; callers are
     expected to add their own confirmation step before hitting this, since
     unlike the dry run it can't be undone. */
-app.post('/print', job_scheduler_authentication, (req, res) => handlePrintRequest(req, res, {dryRun: false}));
+app.post('/print', job_scheduler_authentication, (req, res) => {
+    handlePrintRequest(req.body, res, {dryRun: false})
+});
+
+/* We may not even need this as an endpoint, as the Slack Bot layer is also capable of querying the Airtable Shipment
+    for SKUs, then hitting the /print endpoint. */
+app.post('/print-by-shipment', job_scheduler_authentication, async (req, res) => {
+    /* Given a shipment name as input, grabs the specified shipment from AirTable, collects all unprinted
+        SKU labels, formats the req.body into the JSON array, then hands off to handlePrintRequest(). */
+    console.log(req.body);
+    const { shipment } = req.body;
+    const json_data = await getUnprintedLabels(shipment);
+    console.dir(json_data, {depth: null, color: true});
+    handlePrintRequest(json_data, res, {dryRun: true});
+});
 
 /* Catches express.json()'s SyntaxError for malformed JSON bodies so callers
     get a clean 400 instead of Express's default HTML error page. Must be
     registered after the routes above (Express matches error middleware by
     arity + position). */
 app.use((err, req, res, next) => {
+    console.error(err);
     if (err instanceof SyntaxError && 'body' in err) {
         return res.status(400).send({error: 'Malformed JSON in request body.'});
     }
